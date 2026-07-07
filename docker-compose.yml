@@ -1,0 +1,68 @@
+# CORTEX on Hostinger VPS — Traefik terminates TLS (Let's Encrypt) and routes.
+# NOTE: if KAIROS's traefik already runs on this VPS, do NOT start this traefik
+# service — give the app container the same labels and join KAIROS's proxy network
+# instead (one proxy per host; each app gets its own Host() rule).
+services:
+  traefik:
+    image: "traefik"
+    container_name: cortex-traefik
+    restart: unless-stopped
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entryPoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entryPoint.scheme=https"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.cortexresolver.acme.tlschallenge=true"
+      - "--certificatesresolvers.cortexresolver.acme.email=${SSL_EMAIL}"
+      - "--certificatesresolvers.cortexresolver.acme.storage=/letsencrypt/acme.json"
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - traefik_data:/letsencrypt
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  app:
+    build:
+      context: .
+    image: cortex:latest
+    container_name: cortex
+    restart: unless-stopped
+    env_file:
+      - .env.prod
+    environment:
+      # Absolute path → lands on the mounted volume. Overrides any DB_PATH in .env.
+      DB_PATH: /data/cortex.db
+      TZ: ${TZ:-Europe/Prague}
+    volumes:
+      - data:/data
+    ports:
+      - "127.0.0.1:8000:8000"   # loopback only — for local debugging; Traefik reaches the app via the docker network, not this port
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.cortex.rule=Host(`${DOMAIN_NAME}`)
+      - traefik.http.routers.cortex.tls=true
+      - traefik.http.routers.cortex.entrypoints=web,websecure
+      - traefik.http.routers.cortex.tls.certresolver=cortexresolver
+      - traefik.http.services.cortex.loadbalancer.server.port=8000
+      - traefik.http.middlewares.cortex-headers.headers.SSLRedirect=true
+      - traefik.http.middlewares.cortex-headers.headers.STSSeconds=315360000
+      - traefik.http.middlewares.cortex-headers.headers.browserXSSFilter=true
+      - traefik.http.middlewares.cortex-headers.headers.contentTypeNosniff=true
+      - traefik.http.middlewares.cortex-headers.headers.forceSTSHeader=true
+      - traefik.http.middlewares.cortex-headers.headers.SSLHost=${DOMAIN_NAME}
+      - traefik.http.middlewares.cortex-headers.headers.STSIncludeSubdomains=true
+      - traefik.http.middlewares.cortex-headers.headers.STSPreload=true
+      - traefik.http.routers.cortex.middlewares=cortex-headers@docker
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=5).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  data:
+  traefik_data:

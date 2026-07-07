@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CORTEX</title>
+<style>
+  :root {
+    --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3e;
+    --text: #e2e8f0; --muted: #8892a4; --accent: #b58ebf;
+    --ok: #4ade80; --err: #f87171; --warn: #fbbf24;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: system-ui, sans-serif; font-size: 14px; }
+  header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 12px 20px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 10; }
+  header h1 { font-size: 16px; font-weight: 700; letter-spacing: .05em; color: var(--accent); }
+  header nav a { color: var(--muted); text-decoration: none; font-size: 12px; margin-left: 14px; }
+  header nav a:hover { color: var(--accent); }
+  main { max-width: 1100px; margin: 0 auto; padding: 16px; display: grid; gap: 14px; }
+  section { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 10px; }
+  .counts { display: flex; gap: 20px; flex-wrap: wrap; }
+  .counts div b { font-size: 20px; display: block; color: var(--accent); }
+  .counts div span { font-size: 11px; color: var(--muted); }
+  ul.items { list-style: none; }
+  ul.items li { padding: 6px 0; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
+  ul.items li:last-child { border-bottom: none; }
+  .type { font-size: 10px; text-transform: uppercase; border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; color: var(--muted); white-space: nowrap; }
+  .due { color: var(--warn); font-size: 12px; white-space: nowrap; }
+  .prio-high { color: var(--err); font-weight: 700; }
+  .tags { color: var(--accent); font-size: 12px; }
+  .grow { flex: 1; }
+  .dup { color: var(--warn); font-size: 11px; }
+  button.act { background: none; border: 1px solid var(--border); border-radius: 4px; color: var(--muted); cursor: pointer; padding: 3px 8px; font-size: 11px; white-space: nowrap; }
+  button.act:hover { border-color: var(--accent); color: var(--accent); }
+  #capture-row { display: flex; gap: 8px; }
+  #capture-text { flex: 1; background: #1e2235; border: 1px solid var(--border); color: var(--text); border-radius: 6px; padding: 8px 10px; font-size: 14px; }
+  #capture-text:focus { outline: none; border-color: var(--accent); }
+  #capture-status { font-size: 12px; color: var(--muted); margin-top: 6px; min-height: 15px; white-space: pre-line; }
+  #capture-status.ok { color: var(--ok); } #capture-status.err { color: var(--err); }
+  .chips span { display: inline-block; background: #1e2235; border: 1px solid var(--border); border-radius: 12px; padding: 2px 10px; margin: 2px 4px 2px 0; font-size: 12px; color: var(--accent); }
+  .muted { color: var(--muted); font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; }
+  th { text-align: left; font-size: 11px; text-transform: uppercase; color: var(--muted); padding: 5px 8px; border-bottom: 1px solid var(--border); }
+  td { padding: 5px 8px; border-bottom: 1px solid var(--border); font-size: 13px; vertical-align: top; }
+</style>
+</head>
+<body>
+<header>
+  <h1>CORTEX</h1>
+  <nav>
+    <a href="/tables">Tables</a>
+    <a href="/backlog.md">backlog.md</a>
+    <a href="/admin">Admin</a>
+  </nav>
+</header>
+<main>
+  <section>
+    <h2>Capture</h2>
+    <div id="capture-row">
+      <input id="capture-text" type="text" placeholder="koupit dalnicni znamku, expirace 10.07.2026 important #car"
+             onkeydown="if(event.key==='Enter')capture()">
+      <button class="act" onclick="capture()">Capture</button>
+    </div>
+    <div id="capture-status"></div>
+  </section>
+
+  <section><h2>Counts</h2><div class="counts" id="counts">Loading…</div></section>
+
+  <section><h2>📅 Due ≤ 7 days</h2><ul class="items" id="due"></ul></section>
+  <section><h2>‼️ High priority</h2><ul class="items" id="high"></ul></section>
+  <section><h2>🕸 Stale &amp; 🗂 Someday candidates</h2><ul class="items" id="stale"></ul></section>
+
+  <section><h2>🏷 Tags</h2><div class="chips" id="tags"></div></section>
+
+  <section><h2>Items</h2><div style="overflow-x:auto"><table>
+    <thead><tr><th>id</th><th>type</th><th>content</th><th>due</th><th>prio</th><th>tags</th><th>status</th><th></th></tr></thead>
+    <tbody id="items"></tbody>
+  </table></div></section>
+
+  <section><h2>Recent captures (anonymized log)</h2><ul class="items" id="captures"></ul></section>
+</main>
+
+<script>
+const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+const fmtTs = ts => ts ? new Date(ts * 1000).toLocaleString('cs-CZ', {dateStyle:'short', timeStyle:'short'}) : '';
+const fmtDue = ts => ts ? new Date(ts * 1000).toLocaleDateString('cs-CZ') : '';
+
+async function api(path, method, body) {
+  const opts = {method: method || 'GET'};
+  if (body !== undefined) { opts.headers = {'Content-Type':'application/json'}; opts.body = JSON.stringify(body); }
+  const r = await fetch(path, opts);
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+  return d;
+}
+
+function itemLi(it, extra) {
+  return `<li>
+    <span class="muted">#${it.id}</span>
+    <span class="type">${esc(it.type)}</span>
+    <span class="grow">${esc(it.content)} ${it.tags && it.tags.length ? `<span class="tags">${it.tags.map(t=>'#'+esc(t)).join(' ')}</span>` : ''}</span>
+    ${it.due_ts ? `<span class="due">${fmtDue(it.due_ts)}</span>` : ''}
+    ${it.priority === 'high' ? '<span class="prio-high">!</span>' : ''}
+    ${extra || ''}
+    <button class="act" onclick="markDone(${it.id})">✅</button>
+    <button class="act" onclick="snooze(${it.id})">💤</button>
+  </li>`;
+}
+
+async function markDone(id) { try { await api(`/api/items/${id}`, 'PUT', {status:'done'}); load(); } catch(e) { alert(e.message); } }
+async function snooze(id) { try { await api(`/api/items/${id}`, 'PUT', {snoozed_until_ts: Math.floor(Date.now()/1000) + 7*86400}); load(); } catch(e) { alert(e.message); } }
+
+async function capture() {
+  const el = document.getElementById('capture-text');
+  const st = document.getElementById('capture-status');
+  if (!el.value.trim()) return;
+  st.textContent = 'Capturing…'; st.className = '';
+  try {
+    const d = await api('/api/capture', 'POST', {text: el.value, source: 'api'});
+    const it = d.item;
+    st.textContent = `📥 ${it.type} #${it.id} — ${it.content}` + (d.duplicate_warning ? '\n' + d.duplicate_warning : '');
+    st.className = 'ok';
+    el.value = '';
+    load();
+  } catch (e) { st.textContent = 'Error: ' + e.message; st.className = 'err'; }
+}
+
+async function load() {
+  const s = await api('/api/state');
+  document.getElementById('counts').innerHTML = Object.entries(s.counts).map(([k,v]) =>
+    `<div><b>${v}</b><span>${esc(k)}</span></div>`).join('');
+  document.getElementById('due').innerHTML = s.due.map(it => itemLi(it)).join('') || '<li class="muted">Nothing due.</li>';
+  document.getElementById('high').innerHTML = s.high.map(it => itemLi(it)).join('') || '<li class="muted">Nothing urgent.</li>';
+  document.getElementById('stale').innerHTML =
+    (s.stale.map(it => itemLi(it, '<span class="muted">stale</span>')).join('') +
+     s.someday_candidates.map(it => itemLi(it, '<span class="muted">someday?</span>')).join('')) || '<li class="muted">Nothing stale.</li>';
+  document.getElementById('tags').innerHTML = Object.entries(s.tag_counts).map(([t,n]) =>
+    `<span>#${esc(t)} ${n}</span>`).join('') || '<span class="muted">No tags yet.</span>';
+  document.getElementById('items').innerHTML = s.items.map(it => `<tr>
+    <td class="muted">${it.id}</td><td><span class="type">${esc(it.type)}</span></td>
+    <td>${esc(it.content)}${it.duplicate_of ? ` <span class="dup">dup of #${it.duplicate_of}</span>` : ''}</td>
+    <td class="due">${fmtDue(it.due_ts)}</td>
+    <td>${it.priority === 'high' ? '<span class="prio-high">high</span>' : esc(it.priority)}</td>
+    <td class="tags">${(it.tags||[]).map(t=>'#'+esc(t)).join(' ')}</td>
+    <td>${esc(it.status)}</td>
+    <td>${it.status !== 'done' ? `<button class="act" onclick="markDone(${it.id})">✅</button>` : ''}</td>
+  </tr>`).join('');
+  document.getElementById('captures').innerHTML = s.captures.map(c =>
+    `<li><span class="muted">#${c.id} ${fmtTs(c.created_ts)} [${esc(c.source)}]</span><span class="grow">${esc(c.text)}</span>${c.triaged_item_id ? `<span class="muted">→ item #${c.triaged_item_id}</span>` : ''}</li>`
+  ).join('') || '<li class="muted">No captures yet.</li>';
+}
+load();
+setInterval(load, 30000);
+</script>
+</body>
+</html>
