@@ -287,7 +287,9 @@ docker run --rm -v cortex_data:/d alpine cat /d/cortex.db > cortex.db.bak
 `MODEL_FAST`=`claude-haiku-4-5-20251001` (triage) · `MODEL_SMART`=`claude-sonnet-4-6`
 (weekly summary) · `TELEGRAM_BOT_TOKEN` · `TELEGRAM_CHAT_ID` (brief push target) ·
 `ALLOWED_CHAT_IDS` (comma-separated; gates `/reveal` and capture; empty = allow
-all) · `PUBLIC_BASE_URL` · `DOMAIN_NAME`, `SSL_EMAIL` (compose-only) · `DB_PATH`
+all) · `PUBLIC_BASE_URL` · `DOMAIN_NAME` (compose-only; bare hostname, NO
+`https://` scheme — Traefik's `Host()` rule and ACME both reject a scheme),
+`SSL_EMAIL` (compose-only) · `DB_PATH`
 (compose sets `/data/cortex.db`) · `BRIEF_HOUR`=7 · `WEEKLY_REVIEW_DAY`=sun,
 `WEEKLY_REVIEW_HOUR`=18 · `STALE_DAYS`=30 · `RECENT_ITEMS_FOR_DEDUP`=40 ·
 `TZ`=`Europe/Prague`.
