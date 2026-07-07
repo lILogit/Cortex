@@ -234,8 +234,8 @@ service as KAIROS on the VPS rather than standing up a second proxy.
 
 | Surface | Development (local) | Production (Hostinger, Traefik) |
 |---|---|---|
-| **Run** | `CORTEX_ENV_FILE=.env.test uvicorn app.main:app --reload` | `docker compose up -d --build` |
-| **Env file** | `.env.test` (gitignored) | `.env.prod` (gitignored; compose `env_file`) |
+| **Run** | `CORTEX_ENV_FILE=.env.test uvicorn app.main:app --reload` | `docker compose --env-file .env.prod up -d --build` |
+| **Env file** | `.env.test` (gitignored) | `.env.prod` (gitignored) — single file, passed via `--env-file` so it covers both the app container's `env_file` AND compose's own `${...}` interpolation |
 | **Web** (`/dashboard`) | `http://localhost:8000/dashboard` | `https://${DOMAIN_NAME}/dashboard` |
 | **Telegram** webhook (`/tg`) | `PUBLIC_BASE_URL=https://<ngrok>.ngrok-free.app` | `PUBLIC_BASE_URL=https://${DOMAIN_NAME}` |
 
@@ -262,6 +262,16 @@ symptom is every credential-gated feature going quiet: no Telegram sends (see th
 `TELEGRAM_BOT_TOKEN` warning above), dashboard auth disabled, no LLM triage. Always
 verify by checking the first few lines of container startup logs for the
 `WARNING:` lines, not by assuming the file was picked up.
+
+Root cause of one real incident: `env_file:` (container runtime env) and
+`${DOMAIN_NAME}`-style interpolation in the compose YAML are two *independent*
+lookups — the latter auto-loads a plain `.env` in the project directory unless
+`--env-file` says otherwise; it never falls back to `.env.prod`. Without
+`--env-file .env.prod` (see Commands below), a deployer reasonably creates a
+second, separate `.env` to make interpolation work — now two files that must be
+kept in sync by hand, with nothing enforcing it. `TELEGRAM_BOT_TOKEN` ends up only
+in the `.env` that Compose never passes to `env_file:`. Always deploy with
+`docker compose --env-file .env.prod up -d --build` so there is exactly one file.
 
 **Volume-persistence risk (unconfirmed root cause):** observed once in production —
 the `items`/`captures` count reset to near-zero after a redeploy, meaning the named
@@ -314,7 +324,13 @@ curl -s -X POST http://localhost:8000/api/import/n8n-csv \
   -F "inbox=@inbox_export.csv" -F "vault=@vault_export.csv"
 
 # ── Production (Hostinger VPS, Docker + Traefik) ─────────────────────────────
-docker compose up -d --build
+# --env-file is required: it makes .env.prod the source for BOTH the app
+# container's env_file AND docker-compose.yml's own ${DOMAIN_NAME}/${SSL_EMAIL}
+# interpolation. Without it, Compose falls back to a separate .env for
+# interpolation only — two files to keep in sync, easy to let drift (see the
+# Silent-secrets gotcha above). No standalone .env needed on the VPS at all.
+docker compose --env-file .env.prod up -d --build
+docker compose --env-file .env.prod up -d --force-recreate app   # env-only change, no rebuild
 docker compose logs -f app
 
 # Backup the SQLite volume
