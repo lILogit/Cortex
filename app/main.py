@@ -127,8 +127,13 @@ def triage_capture(capture_id: int, anon_text: str) -> tuple[dict, dict | None]:
     return item, dup
 
 
-async def _triage_and_echo(capture_id: int, anon_text: str) -> None:
-    """Background task behind POST /tg — the webhook already returned 200."""
+async def _ack_triage_and_echo(capture_id: int, anon_text: str, chat_id: str) -> None:
+    """Background task behind POST /tg — the webhook already returned 200.
+
+    Sends an instant ack to the sender's chat first (triage can take a moment,
+    especially on the LLM path), then the processed-format echo once done.
+    """
+    await telegram.send_message("📥 got it — processing…", chat_id=chat_id)
     item, dup = triage_capture(capture_id, anon_text)
     await telegram.send_message(telegram.format_echo(item, dup))
 
@@ -152,7 +157,7 @@ async def telegram_webhook(request: Request, background_tasks: BackgroundTasks):
         # Rule 2: capture lands append-only FIRST; triage runs after we return 200.
         capture_id, anon = insert_capture(text, "telegram", chat_id,
                                           _parse_ts(str(msg.get("date", ""))))
-        background_tasks.add_task(_triage_and_echo, capture_id, anon)
+        background_tasks.add_task(_ack_triage_and_echo, capture_id, anon, chat_id)
     return {"ok": True}
 
 
