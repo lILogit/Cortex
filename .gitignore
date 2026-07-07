@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .venv/
 *.db
+*.bak-*
 .env
 .env.*
 !.env.example
