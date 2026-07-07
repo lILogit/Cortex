@@ -35,6 +35,7 @@
   button.act.danger:hover { border-color: var(--err); color: var(--err); }
   button.act.primary { border-color: var(--accent); color: var(--accent); }
   .actions { display: flex; gap: 6px; }
+  td.actions, th.actions { position: sticky; left: 0; background: var(--surface); z-index: 1; }
 </style>
 </head>
 <body>
@@ -42,6 +43,9 @@
   <h1>CORTEX — Items</h1>
   <div style="display:flex;align-items:center;gap:16px">
     <span id="status"></span>
+    <button class="act" onclick="exportDb()">Export DB</button>
+    <button class="act" onclick="document.getElementById('import-file').click()">Import DB</button>
+    <input type="file" id="import-file" accept=".db" style="display:none" onchange="importDb(this.files[0])">
     <a href="/dashboard">&larr; Dashboard</a>
   </div>
 </header>
@@ -50,7 +54,7 @@
 </main>
 
 <script>
-const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 
 // captures/vault/archive are pipeline-owned or secret — items is the only editable table.
 const COLUMNS = [
@@ -61,6 +65,7 @@ const COLUMNS = [
   {key:'due_ts', type:'number'},
   {key:'status', type:'select', options:['new','todo','open','tracked','someday','done']},
   {key:'kind', type:'select', options:['','income','expense','subscription','one-off']},
+  {key:'recurrence', type:'select', options:['','daily','weekly','monthly']},
   {key:'snoozed_until_ts', type:'number'},
   {key:'duplicate_of', type:'number'},
 ];
@@ -96,7 +101,7 @@ function renderField(col, rowId, value) {
   if (col.type === 'number') {
     return `<input type="number" id="${id}" step="1" value="${value ?? ''}" style="width:110px">`;
   }
-  const val = col.key === 'tags' && Array.isArray(value) ? JSON.stringify(value) : (value ?? '');
+  const val = col.key === 'tags' && Array.isArray(value) ? value.join(', ') : (value ?? '');
   return `<input type="text" id="${id}" value="${esc(val)}" style="width:${col.wide ? 320 : 140}px">`;
 }
 
@@ -120,27 +125,27 @@ async function loadTable() {
 }
 
 function renderTable(rows) {
-  const thead = COLUMNS.map(c => `<th>${esc(c.key)}</th>`).join('') + '<th></th>';
+  const thead = COLUMNS.map(c => `<th>${esc(c.key)}</th>`).join('');
   const body = rows.map(r => {
     const cells = COLUMNS.map(c => `<td>${renderField(c, r.id, r[c.key])}</td>`).join('');
     return `<tr>
       <td style="color:var(--muted)">${r.id}</td>
-      ${cells}
       <td class="actions">
         <button class="act primary" onclick="saveRow(${r.id})">Save</button>
         <button class="act danger" onclick="deleteRow(${r.id})">Delete</button>
       </td>
+      ${cells}
     </tr>`;
   }).join('');
   const newCells = COLUMNS.map(c => `<td>${renderField(c, 'new', '')}</td>`).join('');
   const newRow = `<tr class="new-row">
     <td style="color:var(--muted)">new</td>
+    <td class="actions"><button class="act primary" onclick="addRow()">Add</button></td>
     ${newCells}
-    <td><button class="act primary" onclick="addRow()">Add</button></td>
   </tr>`;
   document.getElementById('table-container').innerHTML = `
     <table>
-      <thead><tr><th>id</th>${thead}</tr></thead>
+      <thead><tr><th>id</th><th class="actions"></th>${thead}</tr></thead>
       <tbody>${body || `<tr><td colspan="${COLUMNS.length + 2}" style="color:var(--muted)">No items yet.</td></tr>`}${newRow}</tbody>
     </table>`;
 }
@@ -177,6 +182,32 @@ async function addRow() {
     showStatus('Added.');
     loadTable();
   } catch (e) { showStatus('Error: ' + e.message, true); }
+}
+
+function exportDb() {
+  window.location.href = '/api/export';
+}
+
+async function importDb(file) {
+  if (!file) return;
+  if (!confirm(`Replace the live database with "${file.name}"? The current one is backed up first, but this switches all data immediately.`)) {
+    document.getElementById('import-file').value = '';
+    return;
+  }
+  showStatus('Importing…');
+  try {
+    const form = new FormData();
+    form.append('file', file);
+    const r = await fetch('/api/import', {method: 'POST', body: form});
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(d.detail || ('HTTP ' + r.status));
+    showStatus(`Imported. Previous db backed up to ${d.backup}.`);
+    loadTable();
+  } catch (e) {
+    showStatus('Error: ' + e.message, true);
+  } finally {
+    document.getElementById('import-file').value = '';
+  }
 }
 
 loadTable();

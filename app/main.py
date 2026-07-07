@@ -9,10 +9,12 @@ Endpoints:
   POST /api/capture          Programmatic capture (same anonymize→triage path).
   CRUD /api/items[/{id}]     Generic CRUD over items.
   POST /api/import/n8n-csv   One-off migration of Cortex v2 Data Tables exports.
+  GET  /api/export, POST /api/import   Full raw SQLite db download/replace (dashboard-auth gated).
   GET  /admin, GET /health
 """
 import csv as _csv
 import io
+import shutil
 import sqlite3
 import time
 from contextlib import asynccontextmanager
@@ -20,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
 from starlette.middleware.sessions import SessionMiddleware
 
 from .anonymize import anonymize
@@ -110,10 +112,11 @@ def triage_capture(capture_id: int, anon_text: str) -> tuple[dict, dict | None]:
         cur = conn.execute(
             """INSERT INTO items
                (type, content, priority, tags, due_ts, status, kind,
-                duplicate_of, created_ts, updated_ts)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                duplicate_of, recurrence, created_ts, updated_ts)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (t["type"], t["content"], t["priority"], tags_dumps(t["tags"]),
-             t["due_ts"], t["status"], t["kind"], t["duplicate_of"], now, now),
+             t["due_ts"], t["status"], t["kind"], t["duplicate_of"],
+             t.get("recurrence"), now, now),
         )
         item_id = cur.lastrowid
         conn.execute(
@@ -267,6 +270,38 @@ async def backlog_md():
     return PlainTextResponse(render_backlog(items), media_type="text/markdown")
 
 
+# ------------------------------ DB export / import ------------------------------
+# Full raw SQLite file, including UNMASKED vault secrets (bypasses rule 4's
+# anonymization entirely) — gated by dashboard auth, unlike the rest of /api/*.
+
+@app.get("/api/export")
+async def export_db(_: None = Depends(auth.require_login)):
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return FileResponse(
+        settings.db_path, media_type="application/octet-stream",
+        filename=f"cortex-export-{ts}.db",
+    )
+
+
+@app.post("/api/import")
+async def import_db(file: UploadFile = File(...), _: None = Depends(auth.require_login)):
+    """Replace the live database with an uploaded one. The current file is backed
+    up alongside first (cortex.db.bak-<epoch>) so this is reversible."""
+    tmp_path = Path(f"{settings.db_path}.upload")
+    tmp_path.write_bytes(await file.read())
+    try:
+        test_conn = sqlite3.connect(tmp_path)
+        test_conn.execute("SELECT COUNT(*) FROM items").fetchone()
+        test_conn.close()
+    except sqlite3.DatabaseError as e:
+        tmp_path.unlink(missing_ok=True)
+        raise HTTPException(400, f"Not a valid CORTEX database: {e}")
+    backup_path = f"{settings.db_path}.bak-{int(time.time())}"
+    shutil.copy(settings.db_path, backup_path)
+    shutil.move(str(tmp_path), settings.db_path)
+    return {"imported": True, "backup": backup_path}
+
+
 # ------------------------------ admin ------------------------------
 
 @app.get("/health")
@@ -293,13 +328,14 @@ async def admin():
 
 _ITEM_COLUMNS = {
     "type", "content", "priority", "tags", "due_ts", "status", "kind",
-    "snoozed_until_ts", "duplicate_of",
+    "snoozed_until_ts", "duplicate_of", "recurrence",
 }
 _ITEM_ENUMS = {
     "type": {"task", "event", "note", "idea", "question", "asset"},
     "priority": {"low", "normal", "high"},
     "status": {"new", "todo", "open", "tracked", "someday", "done"},
     "kind": {"income", "expense", "subscription", "one-off"},
+    "recurrence": {"daily", "weekly", "monthly"},
 }
 
 
@@ -367,7 +403,7 @@ async def items_update(item_id: int, request: Request):
         raise HTTPException(400, f"nothing to update; allowed fields: {sorted(_ITEM_COLUMNS)}")
     # done goes through mark_done so the archive copy is never skipped (rule 6)
     if fields.get("status") == "done":
-        if mark_done(item_id) is None:
+        if mark_done(item_id)[0] is None:
             raise HTTPException(404, f"item {item_id} not found")
         fields.pop("status")
         if not fields:

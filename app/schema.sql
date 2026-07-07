@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS items (
     kind              TEXT,                            -- assets only: income|expense|subscription|one-off
     snoozed_until_ts  INTEGER,
     duplicate_of      INTEGER,                         -- warn-only pointer, never auto-merged (Golden Rule #7)
+    recurrence        TEXT,                            -- NULL|daily|weekly|monthly; mark_done clones the next occurrence
     created_ts        INTEGER NOT NULL,
     updated_ts        INTEGER NOT NULL
 );

@@ -24,6 +24,7 @@ except Exception:  # SDK not installed yet
 ITEM_TYPES = ("task", "event", "note", "idea", "question", "asset")
 STATUSES = ("new", "todo", "open", "tracked", "someday", "done")
 ASSET_KINDS = ("income", "expense", "subscription", "one-off")
+RECURRENCES = ("daily", "weekly", "monthly")
 
 # ---------- date resolution (Europe/Prague) ----------
 
@@ -90,7 +91,20 @@ _ASSET_RE = re.compile(
 _SUBSCRIPTION_RE = re.compile(r"\bp[řr]edplatn[ée]\b|\bsubscription\b", re.IGNORECASE)
 _INCOME_RE = re.compile(r"\bv[ýy]plata\b|\bincome\b|\bp[řr][íi]jem\b", re.IGNORECASE)
 
+_DAILY_RE = re.compile(r"\bdenn[ěe]\b|\bka[žz]d[ýy] den\b|\bdaily\b", re.IGNORECASE)
+_WEEKLY_RE = re.compile(r"\bt[ýy]dn[ěe]\b|\bka[žz]d[ýy] t[ýy]den\b|\bweekly\b", re.IGNORECASE)
+_MONTHLY_RE = re.compile(r"\bm[ěe]s[íi][čc]n[ěe]\b|\bka[žz]d[ýy] m[ěe]s[íi]c\b|\bmonthly\b", re.IGNORECASE)
+
 _DEFAULT_STATUS = {"task": "todo", "event": "tracked"}
+
+
+def resolve_recurrence(text: str) -> tuple[str | None, str]:
+    """Find a recurrence word; return (daily|weekly|monthly|None, text w/o the word)."""
+    for rx, value in ((_DAILY_RE, "daily"), (_WEEKLY_RE, "weekly"), (_MONTHLY_RE, "monthly")):
+        m = rx.search(text)
+        if m:
+            return value, (text[:m.start()] + text[m.end():]).strip(" ,")
+    return None, text
 
 
 def _strip(text: str) -> str:
@@ -126,6 +140,7 @@ def _triage_heuristic(text: str, recent_items: list[dict], today: datetime | Non
     content = _PRIORITY_RE.sub("", content)
 
     due_ts, content = resolve_due(content, today)
+    recurrence, content = resolve_recurrence(content)
 
     if due_ts and _EVENT_WORDS_RE.search(content):
         itype = "event"
@@ -160,6 +175,7 @@ def _triage_heuristic(text: str, recent_items: list[dict], today: datetime | Non
         "due_ts": due_ts,
         "status": _DEFAULT_STATUS.get(itype, "open"),
         "kind": kind,
+        "recurrence": recurrence,
         "duplicate_of": _find_duplicate(content, recent_items),
     }
 
@@ -175,6 +191,7 @@ Respond ONLY with strict JSON, no prose, no markdown:
  "due_date": "YYYY-MM-DD" or "YYYY-MM-DD HH:MM" or null,
  "status": "new|todo|open|tracked|someday|done",
  "kind": "income|expense|subscription|one-off" or null,
+ "recurrence": "daily|weekly|monthly" or null,
  "duplicate_of": int or null}
 
 Rules:
@@ -186,6 +203,9 @@ Rules:
   (koupit, dokončit, zavolat, ověřit, buy, call, finish) => task; forwarded
   notification => note unless it carries a deadline => event; conceptual thought
   => idea; důležité/important/urgent => priority high.
+- recurrence: denně/every day/daily => daily; týdně/every week/weekly => weekly;
+  měsíčně/every month/monthly => monthly; otherwise null. Strip the recurrence
+  word from content same as date words.
 - duplicate_of: if the text refers to the same real-world thing as one of the
   recent items, return that item's id; on a date conflict prefer the official
   notice's date. Never merge — just point.
@@ -253,6 +273,7 @@ def triage(anonymized_text: str, recent_items: list[dict], today: datetime | Non
             "due_ts": _due_date_to_ts(out.get("due_date"), today),
             "status": status,
             "kind": kind if itype == "asset" else None,
+            "recurrence": out.get("recurrence") if out.get("recurrence") in RECURRENCES else None,
             "duplicate_of": dup if isinstance(dup, int) and dup in valid_ids else None,
         }
     except Exception:

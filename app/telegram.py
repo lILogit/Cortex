@@ -48,6 +48,17 @@ def allowed(chat_id: str) -> bool:
     return not ids or str(chat_id) in ids
 
 
+def _format_done(item_id: int, item: dict | None, next_item: dict | None) -> str:
+    if not item:
+        return f"Item #{item_id} not found."
+    msg = f"✅ done #{item_id} — {item['content']}"
+    if next_item:
+        tz = ZoneInfo(settings.tz)
+        due = datetime.fromtimestamp(next_item["due_ts"], tz=tz).strftime("%d.%m.%Y %H:%M")
+        msg += f"\n🔁 next #{next_item['id']} ({item['recurrence']}) due {due}"
+    return msg
+
+
 # ---------- echo (Golden Rule #5: echo the applied diff) ----------
 
 def format_echo(item: dict, dup: dict | None = None) -> str:
@@ -63,6 +74,8 @@ def format_echo(item: dict, dup: dict | None = None) -> str:
         detail.append(" ".join(f"#{t}" for t in tags))
     if item.get("kind"):
         detail.append(f"kind {item['kind']}")
+    if item.get("recurrence"):
+        detail.append(f"🔁 {item['recurrence']}")
     if detail:
         lines.append(" · ".join(detail))
     if dup:
@@ -99,9 +112,8 @@ async def _handle_callback(cq: dict) -> None:
         return
     await _call("answerCallbackQuery", {"callback_query_id": cq.get("id"), "text": f"{action} ✓"})
     if action == "done":
-        item = mark_done(item_id)
-        await send_message(f"✅ done #{item_id} — {item['content']}" if item
-                           else f"Item #{item_id} not found.")
+        item, next_item = mark_done(item_id)
+        await send_message(_format_done(item_id, item, next_item))
     elif action == "snooze":
         item = snooze_item(item_id, 7)
         await send_message(f"💤 snoozed #{item_id} for 7 days — {item['content']}" if item
@@ -139,9 +151,8 @@ async def _handle_command(text: str, chat_id: str) -> None:
         if item_id is None:
             await send_message("Usage: /done <id>", chat_id=chat_id)
             return
-        item = mark_done(item_id)
-        await send_message(f"✅ done #{item_id} — {item['content']}" if item
-                           else f"Item #{item_id} not found.", chat_id=chat_id)
+        item, next_item = mark_done(item_id)
+        await send_message(_format_done(item_id, item, next_item), chat_id=chat_id)
 
     elif cmd == "/snooze":
         args = arg.split()
