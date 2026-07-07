@@ -2,6 +2,17 @@
 # NOTE: if KAIROS's traefik already runs on this VPS, do NOT start this traefik
 # service — give the app container the same labels and join KAIROS's proxy network
 # instead (one proxy per host; each app gets its own Host() rule).
+#
+# ONE env file, named exactly `.env`, next to this compose file. Docker Compose
+# has two independent variable-lookup paths: `${DOMAIN_NAME}`-style interpolation
+# in this YAML (which Compose reads from a file literally named `.env` by
+# default, with NO flag needed) and `env_file:` below (which populates the `app`
+# container's actual runtime environment). They do not merge or fall back to
+# each other — a file with any other name (`.env.prod`, `.env.hostinger`, ...)
+# satisfies neither unless you also pass `--env-file <that name>`, and even then
+# only fixes interpolation, not env_file:, unless env_file: points at the same
+# name too. Naming both paths at `.env` means plain `docker compose up -d
+# --build` just works, with zero flags to remember. cp .env.example .env here.
 services:
   traefik:
     image: "traefik"
@@ -31,7 +42,7 @@ services:
     container_name: cortex
     restart: unless-stopped
     env_file:
-      - .env.prod
+      - .env
     environment:
       # Absolute path → lands on the mounted volume. Overrides any DB_PATH in .env.
       DB_PATH: /data/cortex.db

@@ -225,7 +225,7 @@ Internet ──443──▶ traefik container  (Let's Encrypt, Host(`${DOMAIN_NA
 `traefik` owns 80/443; the app's `127.0.0.1:8000` publish is loopback-only for VPS
 debugging. uvicorn runs `--proxy-headers`. On boot, `lifespan` calls Telegram
 `setWebhook` with `PUBLIC_BASE_URL + "/tg"` — set `PUBLIC_BASE_URL` to the literal
-`https://<domain>` value in `.env.prod` (env_file values aren't variable-expanded).
+`https://<domain>` value in `.env` (env_file values aren't variable-expanded).
 Never run a second app replica: SQLite + in-process scheduler assume a single
 writer. Give CORTEX its own `Host()` rule and domain; it joins the same `traefik`
 service as KAIROS on the VPS rather than standing up a second proxy.
@@ -234,8 +234,8 @@ service as KAIROS on the VPS rather than standing up a second proxy.
 
 | Surface | Development (local) | Production (Hostinger, Traefik) |
 |---|---|---|
-| **Run** | `CORTEX_ENV_FILE=.env.test uvicorn app.main:app --reload` | `docker compose --env-file .env.prod up -d --build` |
-| **Env file** | `.env.test` (gitignored) | `.env.prod` (gitignored) — single file, passed via `--env-file` so it covers both the app container's `env_file` AND compose's own `${...}` interpolation |
+| **Run** | `CORTEX_ENV_FILE=.env.test uvicorn app.main:app --reload` | `docker compose up -d --build` |
+| **Env file** | `.env.test` (gitignored) | `.env` (gitignored) — named to match Compose's own default interpolation file, so it covers both the app container's `env_file:` AND `${...}` interpolation with zero flags |
 | **Web** (`/dashboard`) | `http://localhost:8000/dashboard` | `https://${DOMAIN_NAME}/dashboard` |
 | **Telegram** webhook (`/tg`) | `PUBLIC_BASE_URL=https://<ngrok>.ngrok-free.app` | `PUBLIC_BASE_URL=https://${DOMAIN_NAME}` |
 
@@ -253,25 +253,25 @@ localhost. Confirm with `curl -s "https://api.telegram.org/bot<TOKEN>/getWebhook
 tunnel is down, not the app. Fix: start ngrok on the same domain, no restart of
 uvicorn needed (webhook URL doesn't change).
 
-**Silent-secrets gotcha:** `env_file: - .env.prod` in `docker-compose.yml` requires
-a file named *exactly* `.env.prod` next to the compose file — a differently-named
-file (e.g. `.env.hostinger`) is silently ignored, no error at `docker compose up`.
-Every setting has a safe empty/keyless default (rule 3), so the container starts
-and serves HTTP fine either way — captures and triage keep working. The only
-symptom is every credential-gated feature going quiet: no Telegram sends (see the
-`TELEGRAM_BOT_TOKEN` warning above), dashboard auth disabled, no LLM triage. Always
-verify by checking the first few lines of container startup logs for the
-`WARNING:` lines, not by assuming the file was picked up.
-
-Root cause of one real incident: `env_file:` (container runtime env) and
-`${DOMAIN_NAME}`-style interpolation in the compose YAML are two *independent*
-lookups — the latter auto-loads a plain `.env` in the project directory unless
-`--env-file` says otherwise; it never falls back to `.env.prod`. Without
-`--env-file .env.prod` (see Commands below), a deployer reasonably creates a
-second, separate `.env` to make interpolation work — now two files that must be
-kept in sync by hand, with nothing enforcing it. `TELEGRAM_BOT_TOKEN` ends up only
-in the `.env` that Compose never passes to `env_file:`. Always deploy with
-`docker compose --env-file .env.prod up -d --build` so there is exactly one file.
+**Silent-secrets gotcha (why `env_file:` points at `.env`, not `.env.prod`):**
+Docker Compose has two *independent* variable-lookup paths that do not merge or
+fall back to each other: `${DOMAIN_NAME}`-style interpolation in the compose YAML
+(which Compose auto-loads from a file literally named `.env` in the project
+directory, with no flag needed) and `env_file:` under a service (which populates
+that container's actual runtime environment). A real incident: the file on the
+VPS was named `.env.prod` — interpolation still worked (Traefik/TLS came up fine,
+since something else on the box provided a plain `.env` for that half), but
+`env_file: - .env.prod` was silently satisfied by nothing, because Compose does
+not error on a missing/misnamed `env_file:` entry the way it might elsewhere.
+Every setting has a safe empty/keyless default (rule 3), so the container started
+and served HTTP fine regardless — captures and triage kept working. The only
+symptom was every credential-gated feature going quiet: no Telegram sends (see the
+`TELEGRAM_BOT_TOKEN` warning above), dashboard auth disabled, no LLM triage.
+Naming the one real file `.env` (matching Compose's hardcoded interpolation
+default) closes this permanently — `docker compose up -d --build` with zero flags
+now satisfies both paths from the same file. Always verify by checking the first
+few lines of container startup logs for the `WARNING:` lines after any deploy, not
+by assuming the file was picked up.
 
 **Volume-persistence risk (unconfirmed root cause):** observed once in production —
 the `items`/`captures` count reset to near-zero after a redeploy, meaning the named
@@ -292,7 +292,8 @@ with real data, confirm the deploy path/project identity is stable across redepl
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env.test
-cp .env.example .env.prod
+cp .env.example .env       # on the VPS — see the Silent-secrets gotcha for why
+                            # this must be named .env, not .env.prod
 
 # ── Development ──────────────────────────────────────────────────────────────
 # Terminal 1:
@@ -324,13 +325,11 @@ curl -s -X POST http://localhost:8000/api/import/n8n-csv \
   -F "inbox=@inbox_export.csv" -F "vault=@vault_export.csv"
 
 # ── Production (Hostinger VPS, Docker + Traefik) ─────────────────────────────
-# --env-file is required: it makes .env.prod the source for BOTH the app
-# container's env_file AND docker-compose.yml's own ${DOMAIN_NAME}/${SSL_EMAIL}
-# interpolation. Without it, Compose falls back to a separate .env for
-# interpolation only — two files to keep in sync, easy to let drift (see the
-# Silent-secrets gotcha above). No standalone .env needed on the VPS at all.
-docker compose --env-file .env.prod up -d --build
-docker compose --env-file .env.prod up -d --force-recreate app   # env-only change, no rebuild
+# .env (not .env.prod) is the one file docker-compose.yml expects, so plain
+# `docker compose up` satisfies both env_file: and ${...} interpolation with
+# zero flags — see the Silent-secrets gotcha for the incident that caused this.
+docker compose up -d --build
+docker compose up -d --force-recreate app   # env-only change, no rebuild needed
 docker compose logs -f app
 
 # Backup the SQLite volume
