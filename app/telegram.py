@@ -4,6 +4,7 @@ Plain-text captures are handled in main.py (capture insert must happen FIRST and
 return 200 before triage — rule 2); this module owns everything that starts with
 "/" plus the inline-button callbacks.
 """
+import sys
 import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -14,6 +15,14 @@ from .config import settings
 from .db import get_conn, mark_done, snooze_item, tags_loads
 
 API = "https://api.telegram.org/bot{token}/{method}"
+
+if not settings.telegram_bot_token:
+    print(
+        "WARNING: TELEGRAM_BOT_TOKEN unset — briefs, echoes, and acks are silently "
+        "disabled (keyless mode). Captures/triage still work, but nothing will be "
+        "sent to Telegram until this is set.",
+        file=sys.stderr,
+    )
 
 
 async def _call(method: str, payload: dict) -> dict:
