@@ -71,8 +71,10 @@ Browser ──GET /dashboard──▶ FastAPI ──GET /api/state──▶ live
   proposed, never auto-moved), and counts per tag.
 - **B — Capture** (event, `POST /tg` plain text): insert capture → anonymize →
   `llm.triage` against the last `RECENT_ITEMS_FOR_DEDUP` open items → insert item →
-  echo reply. Triage runs as a FastAPI background task; the webhook returns
-  immediately (rule 2).
+  echo reply. Runs as a FastAPI background task; the webhook returns immediately
+  (rule 2). The background task itself sends two messages: an instant "📥 got it —
+  processing…" ack to the sender's own chat first (triage can take a moment on the
+  LLM path), then the processed-format echo (rule 5) once triage completes.
 - **C — Ingest** (stub): email / calendar / RSS sources feeding the same
   anonymize→triage path via `POST /api/capture`. `jobs.ingest` is a no-op — the
   endpoint works, automated fetch is open work.
@@ -86,6 +88,8 @@ Browser ──GET /dashboard──▶ FastAPI ──GET /api/state──▶ live
 | `app/main.py` | FastAPI app, all endpoints, capture pipeline, lifespan (Telegram webhook registration) | endpoints, ingest pipeline |
 | `app/dashboard.html` | Single-page dashboard (vanilla JS, fetches `/api/state`) | UI changes |
 | `app/tables.html` | Generic CRUD editor UI for `/tables` | inventory-editing UI |
+| `app/auth.py` | Session-based dashboard auth (`require_login` dependency); disabled entirely when `DASHBOARD_PASSWORD` is empty | login/auth behavior |
+| `app/login.html` | Login page (`{{error}}` placeholder swapped in by `auth.render_login_html`) | login page UI |
 | `app/config.py` | env-driven `Settings` (keys, brief hours, stale threshold, tz) | new config knob |
 | `app/db.py` | SQLite connect + `init_db` (runs `schema.sql` then `seed.sql`) | connection concerns |
 | `app/schema.sql` | DDL — all tables, `CREATE IF NOT EXISTS` (idempotent) | schema change |
@@ -98,14 +102,17 @@ Browser ──GET /dashboard──▶ FastAPI ──GET /api/state──▶ live
 | `app/jobs.py` | APScheduler wiring for loop A + due-scan + loop C stub | schedules |
 | `Dockerfile` | single uvicorn process image (non-root, `/data` volume, `--proxy-headers`) | image / runtime deps |
 | `docker-compose.yml` | `traefik` (TLS/routing) + `app`, `data` volume, `/health` healthcheck | Hostinger deploy |
+| `run_dev.sh` | Dev launcher: ngrok tunnel (domain read from `PUBLIC_BASE_URL`) + `uvicorn --reload`, one command instead of two terminals | local dev workflow |
 
 ### Endpoints
 
 | Method | Path | Purpose |
 |---|---|---|
 | `POST` | `/tg` | Telegram webhook — captures, commands, callback buttons |
-| `GET` | `/dashboard` | Web dashboard (HTML) |
-| `GET` | `/tables` | Generic CRUD editor UI (HTML) |
+| `GET/POST` | `/login` | Dashboard login form / submit (sets session cookie) |
+| `GET` | `/logout` | Clear the session cookie |
+| `GET` | `/dashboard` | Web dashboard (HTML) — gated by `require_login` |
+| `GET` | `/tables` | Generic CRUD editor UI (HTML) — gated by `require_login` |
 | `GET` | `/api/state` | Dashboard data snapshot (JSON) |
 | `GET` | `/backlog.md` | Curated markdown render of open items (for Obsidian / reading) |
 | `POST` | `/api/capture` | Programmatic capture — same anonymize→triage path as Telegram text |
@@ -117,6 +124,10 @@ Browser ──GET /dashboard──▶ FastAPI ──GET /api/state──▶ live
 `captures`, `vault`, and `archive` are intentionally excluded from the generic CRUD
 surface — captures/archive are pipeline-owned append-only logs, and the vault holds
 secrets (readable only via Telegram `/reveal`, gated by `ALLOWED_CHAT_IDS`).
+
+`require_login` (`app/auth.py`) is a no-op when `DASHBOARD_PASSWORD` is empty —
+`/dashboard` and `/tables` are wide open in keyless mode, same as every other
+endpoint. `/api/*`, `/admin`, `/tg`, `/health` are never gated by dashboard auth.
 
 ### Telegram commands (parsed in `telegram.py`)
 
@@ -189,6 +200,13 @@ no near due) · `STALE` (updated_ts older than `STALE_DAYS`, weekly review only)
   `db.py`, never raw string munging.
 - New scheduled work → add a job in `jobs.build_scheduler`, not a new process.
 - After changing `.env`, restart — pydantic-settings reads env only at startup.
+- Optional integrations fail soft by design (rule 3: keyless mode must work) — but
+  that makes a genuinely missing prod credential indistinguishable from intentional
+  keyless mode unless it's logged. `telegram.py` and `auth.py` both print a
+  `WARNING:` to stderr at import time when their secret is unset
+  (`TELEGRAM_BOT_TOKEN`, `SESSION_SECRET`), so container logs show it immediately
+  instead of a silent no-op discovered hours later. Follow this pattern for any new
+  optional-credential integration.
 
 ---
 
@@ -235,6 +253,26 @@ localhost. Confirm with `curl -s "https://api.telegram.org/bot<TOKEN>/getWebhook
 tunnel is down, not the app. Fix: start ngrok on the same domain, no restart of
 uvicorn needed (webhook URL doesn't change).
 
+**Silent-secrets gotcha:** `env_file: - .env.prod` in `docker-compose.yml` requires
+a file named *exactly* `.env.prod` next to the compose file — a differently-named
+file (e.g. `.env.hostinger`) is silently ignored, no error at `docker compose up`.
+Every setting has a safe empty/keyless default (rule 3), so the container starts
+and serves HTTP fine either way — captures and triage keep working. The only
+symptom is every credential-gated feature going quiet: no Telegram sends (see the
+`TELEGRAM_BOT_TOKEN` warning above), dashboard auth disabled, no LLM triage. Always
+verify by checking the first few lines of container startup logs for the
+`WARNING:` lines, not by assuming the file was picked up.
+
+**Volume-persistence risk (unconfirmed root cause):** observed once in production —
+the `items`/`captures` count reset to near-zero after a redeploy, meaning the named
+`data` volume did not survive. Docker Compose scopes named volumes by project
+identity (normally the containing directory name); if a hosting panel's redeploy
+mechanism re-clones to a new directory or otherwise changes the project identity
+each time, `data:` silently resolves to a brand-new empty volume even though
+`docker-compose.yml` is byte-for-byte unchanged. Before trusting this deployment
+with real data, confirm the deploy path/project identity is stable across redeploys
+(or back up before every redeploy — see the Commands section).
+
 ---
 
 ## Commands
@@ -251,6 +289,10 @@ cp .env.example .env.prod
 CORTEX_ENV_FILE=.env.test .venv/bin/uvicorn app.main:app --reload --port 8000
 # Terminal 2 (Telegram webhook needs public HTTPS):
 ngrok http --domain=<your-ngrok-domain> 8000
+
+# Or both in one command — reads PUBLIC_BASE_URL from .env (or $CORTEX_ENV_FILE
+# if set) to derive the ngrok domain, starts the tunnel, then uvicorn --reload:
+./run_dev.sh
 
 # Smoke test (no keys, no network) — anonymizer, regex-fallback triage, routing asserts
 .venv/bin/python3 tests/smoke.py
@@ -292,7 +334,10 @@ all) · `PUBLIC_BASE_URL` · `DOMAIN_NAME` (compose-only; bare hostname, NO
 `SSL_EMAIL` (compose-only) · `DB_PATH`
 (compose sets `/data/cortex.db`) · `BRIEF_HOUR`=7 · `WEEKLY_REVIEW_DAY`=sun,
 `WEEKLY_REVIEW_HOUR`=18 · `STALE_DAYS`=30 · `RECENT_ITEMS_FOR_DEDUP`=40 ·
-`TZ`=`Europe/Prague`.
+`TZ`=`Europe/Prague` · `DASHBOARD_USERNAME`=`admin`, `DASHBOARD_PASSWORD` (empty ⇒
+dashboard auth disabled, `/dashboard` and `/tables` wide open) · `SESSION_SECRET`
+(empty ⇒ an ephemeral secret is generated at startup — logins won't survive a
+restart; set it to persist sessions).
 
 ---
 
@@ -311,9 +356,11 @@ all) · `PUBLIC_BASE_URL` · `DOMAIN_NAME` (compose-only; bare hostname, NO
 
 ## Out of scope
 
-- **Multi-user SaaS.** The "planner SaaS" ambition means auth, per-user DBs,
-  billing — a separate product decision, not a feature of this single-user service.
-  Don't add auth middleware speculatively.
+- **Multi-user SaaS.** The "planner SaaS" ambition means per-user accounts,
+  per-user DBs, billing — a separate product decision, not a feature of this
+  single-user service. `app/auth.py` gates the dashboard HTML pages with a single
+  shared username/password (`DASHBOARD_USERNAME`/`DASHBOARD_PASSWORD`), not
+  per-user auth — don't grow it into one without an actual multi-user decision.
 - **Causal graph semantics.** No edges, no chains, no RCDE grammar in this app —
   CORTEX only exports observations (`/promote`). The graph lives in the causal
   toolchain; don't bolt partial graph semantics onto the `items` table.
