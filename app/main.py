@@ -138,7 +138,7 @@ async def _ack_triage_and_echo(capture_id: int, anon_text: str, chat_id: str) ->
     """
     await telegram.send_message("📥 got it — processing…", chat_id=chat_id)
     item, dup = triage_capture(capture_id, anon_text)
-    await telegram.send_message(telegram.format_echo(item, dup))
+    await telegram.send_message(telegram.format_echo(item, dup), chat_id=chat_id)
 
 
 # ------------------------------ Telegram webhook ------------------------------
