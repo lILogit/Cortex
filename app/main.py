@@ -23,6 +23,7 @@ from pathlib import Path
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
+from starlette.background import BackgroundTask
 from starlette.middleware.sessions import SessionMiddleware
 
 from .anonymize import anonymize
@@ -274,12 +275,30 @@ async def backlog_md():
 # Full raw SQLite file, including UNMASKED vault secrets (bypasses rule 4's
 # anonymization entirely) — gated by dashboard auth, unlike the rest of /api/*.
 
+def _consistent_copy(src_path, dest_path) -> None:
+    """Hot-copy a live SQLite db via the official backup API, not a raw file
+    copy. schema.sql runs in WAL mode with concurrent writers (captures,
+    background triage, APScheduler jobs); a plain filesystem copy/stream of the
+    main .db file has no coordination with SQLite's locking and can capture a
+    torn, partially-corrupt snapshot if a write lands mid-copy. backup() is the
+    SQLite-sanctioned way to copy a database that's in active use."""
+    src = sqlite3.connect(src_path)
+    dest = sqlite3.connect(dest_path)
+    with dest:
+        src.backup(dest)
+    dest.close()
+    src.close()
+
+
 @app.get("/api/export")
 async def export_db(_: None = Depends(auth.require_login)):
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    tmp_path = Path(f"{settings.db_path}.export-{ts}")
+    _consistent_copy(settings.db_path, tmp_path)
     return FileResponse(
-        settings.db_path, media_type="application/octet-stream",
+        tmp_path, media_type="application/octet-stream",
         filename=f"cortex-export-{ts}.db",
+        background=BackgroundTask(tmp_path.unlink, missing_ok=True),
     )
 
 
@@ -291,13 +310,14 @@ async def import_db(file: UploadFile = File(...), _: None = Depends(auth.require
     tmp_path.write_bytes(await file.read())
     try:
         test_conn = sqlite3.connect(tmp_path)
-        test_conn.execute("SELECT COUNT(*) FROM items").fetchone()
+        test_conn.execute("PRAGMA integrity_check").fetchone()
+        test_conn.execute("SELECT * FROM items").fetchall()
         test_conn.close()
     except sqlite3.DatabaseError as e:
         tmp_path.unlink(missing_ok=True)
         raise HTTPException(400, f"Not a valid CORTEX database: {e}")
     backup_path = f"{settings.db_path}.bak-{int(time.time())}"
-    shutil.copy(settings.db_path, backup_path)
+    _consistent_copy(settings.db_path, backup_path)
     shutil.move(str(tmp_path), settings.db_path)
     return {"imported": True, "backup": backup_path}
 
